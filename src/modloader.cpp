@@ -58,7 +58,7 @@ void statdump(fs::path const& path) {
       LOG_ERROR("Failed to get status of path: %s", path.c_str());
       return;
     }
-    LOG_DEBUG("File: %s, type: %s, perms: 0x%x", path.c_str(), status_type(status.type()), status.permissions());
+    LOG_DEBUG("File: %s, type: %s, perms: 0x%x", path.c_str(), status_type(status.type()), (unsigned int)status.permissions());
   }
 }
 #else

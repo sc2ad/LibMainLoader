@@ -50,48 +50,17 @@ jobject getActivityFromUnityPlayerInternal(JNIEnv* env) {
   ERR_CHECK(result, env->GetStaticObjectField(clazz, actField));
   return result;
 }
-bool ensurePermsWithUnity(JNIEnv* env, jobject activity, [[maybe_unused]] std::string_view application_id) {
-  ERR_CHECK(clazz, env->FindClass("com/unity3d/player/UnityPermissions"));
-  ERR_CHECK(requestUserPerms, env->GetStaticMethodID(clazz, "requestUserPermissions",
-                                                     "(Landroid/app/Activity;[Ljava/lang/String;Lcom/unity3d/player/"
-                                                     "IPermissionRequestCallbacks;)V"));
-  ERR_CHECK(waitperm_class, env->FindClass("com/unity3d/player/UnityPermissions$ModalWaitForPermissionResponse"));
-  ERR_CHECK(string_class, env->FindClass("java/lang/String"));
-  ERR_CHECK(waitperm_ctor, env->GetMethodID(waitperm_class, "<init>", "()V"));
-  ERR_CHECK(waitperm_wait, env->GetMethodID(waitperm_class, "waitForResponse", "()V"));
 
-  // The set of permissions to request broadly
-  // TODO: Attempt to see if we can create application_id based permissions here as done in ensurePermsWithAppId
-  constexpr std::array kPerms = {
-      "android.permission.WRITE_EXTERNAL_STORAGE",
-      "android.permission.MANAGE_EXTERNAL_STORAGE",
-  };
-
-  // First, create an instance of ModalWaitForPermissionResponse
-  ERR_CHECK(waitperm, env->NewObject(waitperm_class, waitperm_ctor));
-  ERR_CHECK(perms_arr, env->NewObjectArray(kPerms.size(), string_class, nullptr));
-  for (auto i = 0ULL; i < kPerms.size(); i++) {
-    ERR_CHECK(jstr, env->NewStringUTF(kPerms[i]));
-    env->SetObjectArrayElement(perms_arr, i, jstr);
-  }
-  // Call requestUserPermissions on the activity, with the permissions array and waitperm instance
-  env->CallStaticVoidMethod(clazz, requestUserPerms, activity, perms_arr, waitperm);
-  if (env->ExceptionCheck()) return false;
-  // Now wait for the response
-  // TODO: This is actually a blocking call. Ideally, we fire it off and continue and install ourselves as a callback.
-  // That way, we would get called when the perm dialog closes but won't potentially cause loading to hang.
-  env->CallVoidMethod(waitperm, waitperm_wait);
-  return !env->ExceptionCheck();
-}
 bool ensurePermsWithAppId(JNIEnv* env, jobject activity, std::string_view application_id) {
-  ERR_CHECK(clazz, env->FindClass("com/unity3d/player/UnityPlayerActivity"));
-  ERR_CHECK(intentClass, env->FindClass("android/content/Intent"));
-  ERR_CHECK(intentCtorID, env->GetMethodID(intentClass, "<init>", "(Ljava/lang/String;Landroid/net/Uri;)V"));
-  ERR_CHECK(startActivity, env->GetMethodID(clazz, "startActivity", "(Landroid/content/Intent;)V"));
-  ERR_CHECK(uriClass, env->FindClass("android/net/Uri"));
-  ERR_CHECK(uriParse, env->GetStaticMethodID(uriClass, "parse", "(Ljava/lang/String;)Landroid/net/Uri;"));
-  ERR_CHECK(envClass, env->FindClass("android/os/Environment"));
-  ERR_CHECK(isExternalMethod, env->GetStaticMethodID(envClass, "isExternalStorageManager", "()Z"));
+  auto clazz = env->FindClass("com/unity3d/player/UnityPlayerActivity");
+  if(!clazz) {
+    env->ExceptionClear();
+    ERR_CHECK(clazz2, env->FindClass("com/unity3d/player/UnityPlayerGameActivity"));
+    clazz = clazz2;
+  }
+  ERR_CHECK(checkSelfPermission, env->GetMethodID(clazz, "checkSelfPermission", "(Ljava/lang/String;)I"));
+  ERR_CHECK(requestPermissions, env->GetMethodID(clazz, "requestPermissions", "([Ljava/lang/String;I)V"));
+  ERR_CHECK(stringClass, env->FindClass("java/lang/String"));
 
   using namespace std::chrono_literals;
   // We loop the attempt to display permissions
@@ -101,6 +70,40 @@ bool ensurePermsWithAppId(JNIEnv* env, jobject activity, std::string_view applic
   // 2. If the delay is too excessive and causes the app to exit out from watchdog
   constexpr static auto kNumTries = 3;
   constexpr static auto kDelay = 5000ms;
+
+  {
+    const jstring perm = env->NewStringUTF("android.permission.WRITE_EXTERNAL_STORAGE");
+    const jstring perm2 = env->NewStringUTF("android.permission.MANAGE_EXTERNAL_STORAGE");
+    for (int i = 0; i < kNumTries; i++) {
+      LOG_DEBUG("Trial for permissions: %d/%d", i, kNumTries);
+      jint hasPerm = env->CallIntMethod(activity, checkSelfPermission, perm);
+      LOG_DEBUG("checkSelfPermission(WRITE_EXTERNAL_STORAGE, MANAGE_EXTERNAL_STORAGE) returned: %i", hasPerm);
+      if (hasPerm != 0) {
+        jobjectArray arr = env->NewObjectArray(2, stringClass, perm);
+        env->SetObjectArrayElement(arr, 1, perm2);
+        jint requestCode = 21326;  // the number in the alphabet for each letter in BMBF (B=2, M=13, F=6)
+        LOG_INFO("Calling requestPermissions for WRITE_EXTERNAL_STORAGE, MANAGE_EXTERNAL_STORAGE!");
+        env->CallVoidMethod(activity, requestPermissions, arr, requestCode);
+        if (env->ExceptionCheck()) return false;
+      } else {
+        LOG_DEBUG("Permission is accepted!");
+        break;
+      }
+      std::this_thread::sleep_for(kDelay);
+    }
+  }
+  // Extra permission not needed on older android versions and our method to obtain it does not work
+  if(android_get_device_api_level() < 30) {
+    return !env->ExceptionCheck();
+  }
+
+  ERR_CHECK(intentClass, env->FindClass("android/content/Intent"));
+  ERR_CHECK(intentCtorID, env->GetMethodID(intentClass, "<init>", "(Ljava/lang/String;Landroid/net/Uri;)V"));
+  ERR_CHECK(startActivity, env->GetMethodID(clazz, "startActivity", "(Landroid/content/Intent;)V"));
+  ERR_CHECK(uriClass, env->FindClass("android/net/Uri"));
+  ERR_CHECK(uriParse, env->GetStaticMethodID(uriClass, "parse", "(Ljava/lang/String;)Landroid/net/Uri;"));
+  ERR_CHECK(envClass, env->FindClass("android/os/Environment"));
+  ERR_CHECK(isExternalMethod, env->GetStaticMethodID(envClass, "isExternalStorageManager", "()Z"));
 
   for (int i = 0; i < kNumTries; i++) {
     auto result = env->CallStaticBooleanMethod(envClass, isExternalMethod);
@@ -147,7 +150,9 @@ std::optional<fileutils::path_container> fileutils::getDirs(JNIEnv* env, std::st
   // Construct the path to the modloader here, as there's no point in attempting to load if we can't get the other dirs
   // as well
   fileutils::path_container result{.modloaderSearchPath =
-                                       std::filesystem::absolute("/sdcard/ModData"_fp / application_id / "Modloader")};
+                                       std::filesystem::absolute("/sdcard/ModData"_fp / application_id / "Modloader"),
+                                      .filesDir{},
+                                    .externalDir{}};
 
   ERR_CHECK(at, env->CallStaticObjectMethod(activityThreadClass, currentActivityThreadMethod));
   ERR_CHECK(context, env->CallObjectMethod(at, getApplicationMethod));
@@ -195,11 +200,6 @@ jobject fileutils::getActivityFromUnityPlayer(JNIEnv* env) {
 }
 
 bool fileutils::ensurePerms(JNIEnv* env, jobject activity, std::string_view application_id) {
-  // First, try to use unity. Failing that, use a fallback
-  if (ensurePermsWithUnity(env, activity, application_id)) return true;
-  if (env->ExceptionCheck()) env->ExceptionDescribe();
-  LOG_ERROR("libmain.ensurePermsWithUnity failed! See 'System.err' tag.");
-  env->ExceptionClear();
   // TODO: The correct thing to do would be to listen to the completion event and resume modloading when that happens.
   // Instead, we actually sleep the thread, which is potentially problematic.
   if (ensurePermsWithAppId(env, activity, application_id)) return true;
